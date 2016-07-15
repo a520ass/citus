@@ -142,10 +142,10 @@ MultiExplainOneQuery(Query *query, IntoClause *into, ExplainState *es,
 	 */
 	originalQuery = copyObject(query);
 
-	restrictionContext = CreateAndPushRestrictionContext();
-
 	/* measure the full planning time to display in EXPLAIN ANALYZE */
 	INSTR_TIME_SET_CURRENT(planStart);
+
+	restrictionContext = CreateAndPushRestrictionContext();
 
 	PG_TRY();
 	{
@@ -173,10 +173,10 @@ MultiExplainOneQuery(Query *query, IntoClause *into, ExplainState *es,
 	}
 	PG_END_TRY();
 
+	PopRestrictionContext();
+
 	INSTR_TIME_SET_CURRENT(planDuration);
 	INSTR_TIME_SUBTRACT(planDuration, planStart);
-
-	PopRestrictionContext();
 
 	if (ExplainMultiLogicalPlan)
 	{

@@ -1122,7 +1122,6 @@ WorkersContainingAllShards(List *prunedShardIntervalsList)
 {
 	ListCell *prunedShardIntervalCell = NULL;
 	bool firstShard = true;
-	List *workerNodeList = NIL;
 	List *placementList = NIL;
 
 	foreach(prunedShardIntervalCell, prunedShardIntervalsList)
@@ -1132,7 +1131,6 @@ WorkersContainingAllShards(List *prunedShardIntervalsList)
 		uint64 shardId = INVALID_SHARD_ID;
 		List *shardPlacementList = NIL;
 		ListCell *shardPlacementCell = NULL;
-		List *shardNodeList = NIL;
 
 		Assert(list_length(shardIntervalList) == 1);
 
@@ -1142,62 +1140,45 @@ WorkersContainingAllShards(List *prunedShardIntervalsList)
 		/* retrieve all active shard placements for this shard */
 		shardPlacementList = FinalizedShardPlacementList(shardId);
 
-		/* create nodeName:nodePort tuples for each placement */
-		foreach(shardPlacementCell, shardPlacementList)
-		{
-			ShardPlacement *shardPlacement = (ShardPlacement *) lfirst(
-				shardPlacementCell);
-			StringInfo nodeInfo = makeStringInfo();
-			appendStringInfo(nodeInfo, "%s:%u", shardPlacement->nodeName,
-							 shardPlacement->nodePort);
-			shardNodeList = lappend(shardNodeList, nodeInfo);
-		}
-
 		/*
-		 * Perform placement pruning based on string matching on nodeName:nodePort
-		 * tuples. We start pruning from all placements of the first relation's shard.
-		 * Then for each relation's shard, we compute intersection of the new shards
-		 * placement with existing placement list. This operation could have been
-		 * done using other methods, but since we do not expect very high replication
-		 * factor, iterating over a list and making string comparisons should be the
-		 * fastest way around.
+		 * Perform placement pruning based on matching on nodeName:nodePort fields of
+		 * shard placement data. We start pruning from all placements of the first
+		 * relation's shard. Then for each relation's shard, we compute intersection
+		 * of the new shards placement with existing placement list. This operation
+		 * could have been done using other methods, but since we do not expect very
+		 * high replication factor, iterating over a list and making string comparisons
+		 * should be the fastest way around.
 		 */
 		if (firstShard)
 		{
 			firstShard = false;
-			workerNodeList = shardNodeList;
 			placementList = shardPlacementList;
 		}
 		else
 		{
-			List *existingWorkerNodeList = workerNodeList;
-			ListCell *existingWorkerNodeCell = NULL;
-			ListCell *shardNodeCell = NULL;
+			ListCell *existingPlacementCell = NULL;
+			List *existingPlacementList = placementList;
 
 			/* reset active placement list and active worker node list */
 			placementList = NIL;
-			workerNodeList = NIL;
 
-			forboth(shardNodeCell, shardNodeList, shardPlacementCell, shardPlacementList)
+			/*
+			 * Keep existing placement in the list if it is also present in new
+			 * table shard's placement list.
+			 */
+			foreach(existingPlacementCell, existingPlacementList)
 			{
-				ShardPlacement *shardPlacement =
-					(ShardPlacement *) lfirst(shardPlacementCell);
-
-				foreach(existingWorkerNodeCell, existingWorkerNodeList)
+				ShardPlacement *existingPlacement =
+					(ShardPlacement *) lfirst(existingPlacementCell);
+				foreach(shardPlacementCell, shardPlacementList)
 				{
-					StringInfo existingNodeInfo =
-						(StringInfo) lfirst(existingWorkerNodeCell);
-					StringInfo newNodeInfo = (StringInfo) lfirst(shardNodeCell);
-
-					/*
-					 * Append placement to placement list if it is already in existing
-					 * placement list.
-					 */
-					if (strncmp(existingNodeInfo->data, newNodeInfo->data,
-								existingNodeInfo->len) == 0)
+					ShardPlacement *shardPlacement =
+						(ShardPlacement *) lfirst(shardPlacementCell);
+					if ((shardPlacement->nodePort == existingPlacement->nodePort) &&
+						(strncmp(shardPlacement->nodeName, existingPlacement->nodeName,
+								WORKER_LENGTH) == 0))
 					{
-						placementList = lappend(placementList, shardPlacement);
-						workerNodeList = lappend(workerNodeList, existingNodeInfo);
+						placementList = lappend(placementList, existingPlacement);
 					}
 				}
 			}
@@ -1279,7 +1260,7 @@ UpdateRelationNames(Node *node, RelationRestrictionContext *restrictionContext)
 
 	if (relationRestriction == NULL)
 	{
-		Relation relation = heap_open(newRte->relid, AccessShareLock);
+		Relation relation = heap_open(newRte->relid, NoLock);
 		TupleDesc tupleDescriptor = RelationGetDescr(relation);
 		int columnCount = tupleDescriptor->natts;
 		int columnIndex = 0;
@@ -1306,7 +1287,7 @@ UpdateRelationNames(Node *node, RelationRestrictionContext *restrictionContext)
 		newRte->values_lists = lappend(newRte->values_lists, valuesList);
 		newRte->values_collations = collationList;
 		newRte->alias = copyObject(newRte->eref);
-		heap_close(relation, AccessShareLock);
+		heap_close(relation, NoLock);
 
 		return false;
 	}
