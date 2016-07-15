@@ -26,6 +26,9 @@
 #include "utils/lsyscache.h"
 
 
+/* state needed to prevent new connections during modifying transactions */
+bool IsModifyingTransaction = false;
+
 /* local function forward declarations */
 static Datum ExtractIntegerDatum(char *input);
 

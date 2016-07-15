@@ -381,6 +381,13 @@ ConnectToNode(char *nodeName, int32 nodePort, char *nodeUser)
 
 	sprintf(nodePortString, "%d", nodePort);
 
+	if (IsModifyingTransaction)
+	{
+		ereport(ERROR, (errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+						errmsg("cannot open new connection during modifying "
+							   "transaction")));
+	}
+
 	Assert(sizeof(keywordArray) == sizeof(valueArray));
 
 	for (attemptIndex = 0; attemptIndex < MAX_CONNECT_ATTEMPTS; attemptIndex++)

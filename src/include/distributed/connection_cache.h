@@ -53,6 +53,10 @@ typedef struct NodeConnectionEntry
 } NodeConnectionEntry;
 
 
+/* state needed to prevent new connections during modifying transactions */
+extern bool IsModifyingTransaction;
+
+
 /* function declarations for obtaining and using a connection */
 extern PGconn * GetOrEstablishConnection(char *nodeName, int32 nodePort);
 extern void PurgeConnection(PGconn *connection);

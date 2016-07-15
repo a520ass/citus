@@ -105,6 +105,24 @@ INSERT INTO researchers VALUES (9, 6, 'Leslie Lamport');
 ERROR:  no transaction participant matches localhost:57638
 DETAIL:  Transactions which modify distributed tables may only target nodes affected by the modification command which began the transaction.
 COMMIT;
+-- this logic even applies to router SELECTs occurring after a modification...
+BEGIN;
+INSERT INTO labs VALUES (6, 'Bell Labs');
+SELECT * FROM researchers WHERE id = 8;
+ERROR:  cannot open new connection during modifying transaction
+COMMIT;
+-- applies to DDL or COPY, too
+BEGIN;
+INSERT INTO labs VALUES (6, 'Bell Labs');
+ALTER TABLE labs ADD COLUMN text motto;
+ERROR:  cannot open new connection during modifying transaction
+COMMIT;
+BEGIN;
+INSERT INTO labs VALUES (6, 'Bell Labs');
+\copy labs from stdin delimiter ','
+ERROR:  cannot open new connection during modifying transaction
+CONTEXT:  COPY labs, line 1: "7,E Corp"
+COMMIT;
 -- now, for some special failures...
 CREATE TABLE objects (
 	id bigint PRIMARY KEY,

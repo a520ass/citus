@@ -78,6 +78,25 @@ INSERT INTO labs VALUES (6, 'Bell Labs');
 INSERT INTO researchers VALUES (9, 6, 'Leslie Lamport');
 COMMIT;
 
+-- this logic even applies to router SELECTs occurring after a modification...
+BEGIN;
+INSERT INTO labs VALUES (6, 'Bell Labs');
+SELECT * FROM researchers WHERE id = 8;
+COMMIT;
+
+-- applies to DDL or COPY, too
+BEGIN;
+INSERT INTO labs VALUES (6, 'Bell Labs');
+ALTER TABLE labs ADD COLUMN text motto;
+COMMIT;
+
+BEGIN;
+INSERT INTO labs VALUES (6, 'Bell Labs');
+\copy labs from stdin delimiter ','
+7,E Corp
+\.
+COMMIT;
+
 -- now, for some special failures...
 CREATE TABLE objects (
 	id bigint PRIMARY KEY,

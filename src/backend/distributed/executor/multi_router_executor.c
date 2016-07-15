@@ -207,6 +207,8 @@ InitTransactionStateForTask(Task *task)
 	}
 
 	MemoryContextSwitchTo(oldContext);
+
+	IsModifyingTransaction = true;
 }
 
 
@@ -1039,6 +1041,7 @@ RouterTransactionCallback(XactEvent event, void *arg)
 	}
 
 	/* reset transaction state */
+	IsModifyingTransaction = false;
 	xactParticipantHash = NULL;
 	subXactAbortAttempted = false;
 }
