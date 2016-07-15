@@ -863,6 +863,7 @@ ExecuteTransactionEnd(bool commit)
 	char *sqlCommand = commit ? "COMMIT TRANSACTION" : "ABORT TRANSACTION";
 	HASH_SEQ_STATUS scan;
 	XactParticipantEntry *participant;
+	bool completed = !commit; // aborts are assumed completed
 
 	hash_seq_init(&scan, xactParticipantHash);
 	while ((participant = (XactParticipantEntry *) hash_seq_search(&scan)))
@@ -876,7 +877,11 @@ ExecuteTransactionEnd(bool commit)
 		}
 
 		result = PQexec(connection, sqlCommand);
-		if (PQresultStatus(result) != PGRES_COMMAND_OK)
+		if (PQresultStatus(result) == PGRES_COMMAND_OK)
+		{
+			completed = true;
+		}
+		else
 		{
 			WarnRemoteError(connection, result);
 			PurgeConnection(connection);
@@ -888,6 +893,11 @@ ExecuteTransactionEnd(bool commit)
 		}
 
 		PQclear(result);
+	}
+
+	if (!completed)
+	{
+		ereport(ERROR, (errmsg("could not commit transaction on any active nodes")));
 	}
 }
 
@@ -979,10 +989,6 @@ RouterTransactionCallback(XactEvent event, void *arg)
 #endif
 		case XACT_EVENT_COMMIT:
 		{
-			bool commit = true;
-
-			ExecuteTransactionEnd(commit);
-
 			break;
 		}
 
@@ -1014,6 +1020,8 @@ RouterTransactionCallback(XactEvent event, void *arg)
 #endif
 		case XACT_EVENT_PRE_COMMIT:
 		{
+			bool commit = true;
+
 			if (subXactAbortAttempted)
 			{
 				subXactAbortAttempted = false;
@@ -1022,6 +1030,8 @@ RouterTransactionCallback(XactEvent event, void *arg)
 								errmsg("cannot ROLLBACK TO SAVEPOINT in transactions "
 									   "which modify distributed tables")));
 			}
+
+			ExecuteTransactionEnd(commit);
 
 			/* leave early to avoid resetting transaction state */
 			return;
