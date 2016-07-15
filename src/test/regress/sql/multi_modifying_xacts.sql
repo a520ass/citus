@@ -78,11 +78,27 @@ INSERT INTO labs VALUES (6, 'Bell Labs');
 INSERT INTO researchers VALUES (9, 6, 'Leslie Lamport');
 COMMIT;
 
--- this logic even applies to router SELECTs occurring after a modification...
+-- this logic even applies to router SELECTs occurring after a modification:
+-- selecting from the modified node is fine...
 BEGIN;
 INSERT INTO labs VALUES (6, 'Bell Labs');
-SELECT * FROM researchers WHERE id = 8;
-COMMIT;
+SELECT count(*) FROM researchers WHERE lab_id = 6;
+ABORT;
+
+-- but if a SELECT needs to go to new node, that's a problem...
+
+BEGIN;
+
+UPDATE pg_dist_shard_placement AS sp SET shardstate = 3
+FROM   pg_dist_shard AS s
+WHERE  sp.shardid = s.shardid
+AND    sp.nodename = 'localhost'
+AND    sp.nodeport = :worker_1_port
+AND    s.logicalrelid = 'researchers'::regclass;
+
+INSERT INTO labs VALUES (6, 'Bell Labs');
+SELECT count(*) FROM researchers WHERE lab_id = 6;
+ABORT;
 
 -- applies to DDL or COPY, too
 BEGIN;

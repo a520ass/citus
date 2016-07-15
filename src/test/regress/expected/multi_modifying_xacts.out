@@ -105,12 +105,30 @@ INSERT INTO researchers VALUES (9, 6, 'Leslie Lamport');
 ERROR:  no transaction participant matches localhost:57638
 DETAIL:  Transactions which modify distributed tables may only target nodes affected by the modification command which began the transaction.
 COMMIT;
--- this logic even applies to router SELECTs occurring after a modification...
+-- this logic even applies to router SELECTs occurring after a modification:
+-- selecting from the modified node is fine...
 BEGIN;
 INSERT INTO labs VALUES (6, 'Bell Labs');
-SELECT * FROM researchers WHERE id = 8;
-ERROR:  cannot open new connection during modifying transaction
-COMMIT;
+SELECT count(*) FROM researchers WHERE lab_id = 6;
+ count 
+-------
+     0
+(1 row)
+
+ABORT;
+-- but if a SELECT needs to go to new node, that's a problem...
+BEGIN;
+UPDATE pg_dist_shard_placement AS sp SET shardstate = 3
+FROM   pg_dist_shard AS s
+WHERE  sp.shardid = s.shardid
+AND    sp.nodename = 'localhost'
+AND    sp.nodeport = :worker_1_port
+AND    s.logicalrelid = 'researchers'::regclass;
+INSERT INTO labs VALUES (6, 'Bell Labs');
+SELECT count(*) FROM researchers WHERE lab_id = 6;
+ERROR:  no transaction participant matches localhost:57638
+DETAIL:  Transactions which modify distributed tables may only target nodes affected by the modification command which began the transaction.
+ABORT;
 -- applies to DDL or COPY, too
 BEGIN;
 INSERT INTO labs VALUES (6, 'Bell Labs');
