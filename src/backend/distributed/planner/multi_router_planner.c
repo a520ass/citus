@@ -1103,6 +1103,8 @@ TargetShardIntervalsForSelect(Query *query,
 }
 
 
+
+
 /*
  * WorkersContainingAllShards returns list of shard placements that contain all
  * shard intervals provided to the function. It returns NIL if no placement exists.
@@ -1112,15 +1114,14 @@ WorkersContainingAllShards(List *prunedShardIntervalsList)
 {
 	ListCell *prunedShardIntervalCell = NULL;
 	bool firstShard = true;
-	List *placementList = NIL;
+	List *currentPlacementList = NIL;
 
 	foreach(prunedShardIntervalCell, prunedShardIntervalsList)
 	{
 		List *shardIntervalList = (List *) lfirst(prunedShardIntervalCell);
 		ShardInterval *shardInterval = NULL;
 		uint64 shardId = INVALID_SHARD_ID;
-		List *shardPlacementList = NIL;
-		ListCell *shardPlacementCell = NULL;
+		List *newPlacementList = NIL;
 
 		Assert(list_length(shardIntervalList) == 1);
 
@@ -1128,50 +1129,18 @@ WorkersContainingAllShards(List *prunedShardIntervalsList)
 		shardId = shardInterval->shardId;
 
 		/* retrieve all active shard placements for this shard */
-		shardPlacementList = FinalizedShardPlacementList(shardId);
+		newPlacementList = FinalizedShardPlacementList(shardId);
 
-		/*
-		 * Perform placement pruning based on matching on nodeName:nodePort fields of
-		 * shard placement data. We start pruning from all placements of the first
-		 * relation's shard. Then for each relation's shard, we compute intersection
-		 * of the new shards placement with existing placement list. This operation
-		 * could have been done using other methods, but since we do not expect very
-		 * high replication factor, iterating over a list and making string comparisons
-		 * should be the fastest way around.
-		 */
 		if (firstShard)
 		{
 			firstShard = false;
-			placementList = shardPlacementList;
+			currentPlacementList = newPlacementList;
 		}
 		else
 		{
-			ListCell *existingPlacementCell = NULL;
-			List *existingPlacementList = placementList;
-
-			/* reset active placement list and active worker node list */
-			placementList = NIL;
-
-			/*
-			 * Keep existing placement in the list if it is also present in new
-			 * table shard's placement list.
-			 */
-			foreach(existingPlacementCell, existingPlacementList)
-			{
-				ShardPlacement *existingPlacement =
-					(ShardPlacement *) lfirst(existingPlacementCell);
-				foreach(shardPlacementCell, shardPlacementList)
-				{
-					ShardPlacement *shardPlacement =
-						(ShardPlacement *) lfirst(shardPlacementCell);
-					if ((shardPlacement->nodePort == existingPlacement->nodePort) &&
-						(strncmp(shardPlacement->nodeName, existingPlacement->nodeName,
-								 WORKER_LENGTH) == 0))
-					{
-						placementList = lappend(placementList, existingPlacement);
-					}
-				}
-			}
+			/* keep placements that still exists for this shard */
+			currentPlacementList = IntersectPlacementList(currentPlacementList,
+														  newPlacementList);
 		}
 
 		/*
@@ -1179,9 +1148,45 @@ WorkersContainingAllShards(List *prunedShardIntervalsList)
 		 * containing all shards referecend by the query, hence we can not forward
 		 * this query directly to any worker.
 		 */
-		if (placementList == NIL)
+		if (currentPlacementList == NIL)
 		{
 			break;
+		}
+	}
+
+	return currentPlacementList;
+}
+
+
+/*
+ * IntersectPlacementList performs placement pruning based on matching on
+ * nodeName:nodePort fields of shard placement data. We start pruning from all
+ * placements of the first relation's shard. Then for each relation's shard, we
+ * compute intersection of the new shards placement with existing placement list.
+ * This operation could have been done using other methods, but since we do not
+ * expect very high replication factor, iterating over a list and making string
+ * comparisons should be the fastest way around.
+ */
+static List *
+IntersectPlacementList(List *lhsPlacementList, List *rhsPlacementList)
+{
+	ListCell *lhsPlacementCell = NULL;
+	List *placementList = NIL;
+
+	/* Keep existing placement in the list if it is also present in new placement list */
+	foreach(lhsPlacementCell, lhsPlacementList)
+	{
+		ShardPlacement *lhsPlacement = (ShardPlacement *) lfirst(lhsPlacementCell);
+		ListCell *rhsPlacementCell = NULL;
+		foreach(rhsPlacementCell, rhsPlacementList)
+		{
+			ShardPlacement *rhsPlacement = (ShardPlacement *) lfirst(rhsPlacementCell);
+			if ((rhsPlacement->nodePort == lhsPlacement->nodePort) &&
+				(strncmp(rhsPlacement->nodeName, lhsPlacement->nodeName,
+						 WORKER_LENGTH) == 0))
+			{
+				placementList = lappend(placementList, rhsPlacement);
+			}
 		}
 	}
 
@@ -1189,6 +1194,15 @@ WorkersContainingAllShards(List *prunedShardIntervalsList)
 }
 
 
+/*
+ * UpdateRelationNames walks over the query tree and appends shard ids to
+ * relations. It uses unique identity value to establish connection between a
+ * shard and the range table entry. If the range table id is not given a
+ * identity, than the relation is not referenced from the query, no connection
+ * could be found between a shard and this relation. Therefore relation is replaced
+ * by set of NULL values so that the query would work at worker without any problems.
+ *
+ */
 static bool
 UpdateRelationNames(Node *node, RelationRestrictionContext *restrictionContext)
 {
