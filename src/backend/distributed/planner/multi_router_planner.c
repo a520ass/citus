@@ -87,6 +87,7 @@ static Task * RouterSelectTask(Query *originalQuery, Query *query,
 static List * TargetShardIntervalsForSelect(Query *query,
 											RelationRestrictionContext *restrictionContext);
 static List * WorkersContainingAllShards(List *prunedShardIntervalsList);
+static List * IntersectPlacementList(List *lhsPlacementList, List *rhsPlacementList);
 static bool UpdateRelationNames(Node *node,
 								RelationRestrictionContext *restrictionContext);
 static Job * RouterQueryJob(Query *query, Task *task, List *placementList);
@@ -1101,8 +1102,6 @@ TargetShardIntervalsForSelect(Query *query,
 
 	return prunedRelationShardList;
 }
-
-
 
 
 /*
