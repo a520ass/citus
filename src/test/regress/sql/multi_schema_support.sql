@@ -57,7 +57,7 @@ SELECT master_append_table_to_shard(1190001, 'nation_local', 'localhost', :maste
 -- verify table actually appended to shard
 SELECT COUNT(*) FROM test_schema_support."nation._'append";
 
--- test with search_path is set
+-- test master_append_table_to_shard with schema with search_path is set
 SET search_path TO test_schema_support;
 
 SELECT master_append_table_to_shard(1190000, 'public.nation_local', 'localhost', :master_port);
@@ -72,7 +72,7 @@ SELECT master_append_table_to_shard(1190001, 'nation_local', 'localhost', :maste
 SELECT COUNT(*) FROM "nation._'append";
 
 
--- test shard creation when search_path is set
+-- test shard creation on append(by data loading) and hash distributed(with UDF) tables when search_path is set
 SET search_path TO test_schema_support;
 
 -- create shard with COPY on append distributed table
@@ -93,9 +93,6 @@ SELECT master_create_distributed_table('nation_append_search_path', 'n_nationkey
 5|ETHIOPIA|0|ven packages wake quickly. regu
 \.
 
--- create shard with master_create_empty_shard
-SELECT master_create_empty_shard('nation_append_search_path');
-
 -- create shard with master_create_worker_shards
 CREATE TABLE test_schema_support.nation_hash(
     n_nationkey integer not null,
@@ -114,7 +111,6 @@ DECLARE test_cursor CURSOR FOR
     SELECT *
         FROM test_schema_support.nation_append
         WHERE n_nationkey = 1;
-        FETCH test_cursor;
 FETCH test_cursor;
 END;
 
@@ -125,7 +121,6 @@ DECLARE test_cursor CURSOR FOR
     SELECT *
         FROM nation_append
         WHERE n_nationkey = 1;
-        FETCH test_cursor;
 FETCH test_cursor;
 END;
 
@@ -199,12 +194,12 @@ LANGUAGE 'plpgsql' IMMUTABLE;
 
 \c - - - :master_port
 
--- UDF in public, table in schema, search_path is not set
-SELECT dummyFunction(n_nationkey) FROM test_schema_support.nation_hash GROUP BY 1;
+-- UDF in public, table in a schema other than public, search_path is not set
+SELECT dummyFunction(n_nationkey) FROM test_schema_support.nation_hash GROUP BY 1 ORDER BY 1;
 
--- UDF in public, table in schema, search_path is set
+-- UDF in public, table in a schema other than public, search_path is set
 SET search_path TO test_schema_support;
-SELECT public.dummyFunction(n_nationkey) FROM test_schema_support.nation_hash GROUP BY 1;
+SELECT public.dummyFunction(n_nationkey) FROM test_schema_support.nation_hash GROUP BY 1 ORDER BY 1;
 
 -- create UDF in master node in schema
 SET search_path TO test_schema_support;
@@ -249,13 +244,13 @@ LANGUAGE 'plpgsql' IMMUTABLE;
 
 \c - - - :master_port
 
--- UDF in schema, table in schema, search_path is not set
+-- UDF in schema, table in a schema other than public, search_path is not set
 SET search_path TO public;
-SELECT test_schema_support.dummyFunction2(n_nationkey) FROM test_schema_support.nation_hash  GROUP BY 1;
+SELECT test_schema_support.dummyFunction2(n_nationkey) FROM test_schema_support.nation_hash  GROUP BY 1 ORDER BY 1;
 
--- UDF in schema, table in schema, search_path is set
+-- UDF in schema, table in a schema other than public, search_path is set
 SET search_path TO test_schema_support;
-SELECT dummyFunction2(n_nationkey) FROM nation_hash  GROUP BY 1;
+SELECT dummyFunction2(n_nationkey) FROM nation_hash  GROUP BY 1 ORDER BY 1;
 
 
 -- test operators with schema
@@ -332,11 +327,47 @@ CREATE COLLATION test_schema_support.english FROM "en_US";
 
 \c - - - :master_port
 
-SELECT n_name = 'Turkey' COLLATE test_schema_support.english FROM test_schema_support.nation_hash;
+CREATE TABLE test_schema_support.nation_hash_collation(
+    n_nationkey integer not null,
+    n_name char(25) not null COLLATE test_schema_support.english,
+    n_regionkey integer not null,
+    n_comment varchar(152)
+);
+SELECT master_create_distributed_table('test_schema_support.nation_hash_collation', 'n_nationkey', 'hash');
+SELECT master_create_worker_shards('test_schema_support.nation_hash_collation', 4, 1);
+
+\COPY test_schema_support.nation_hash_collation FROM STDIN with delimiter '|';
+0|ALGERIA|0| haggle. carefully final deposits detect slyly agai
+1|ARGENTINA|1|al foxes promise slyly according to the regular accounts. bold requests alon
+2|BRAZIL|1|y alongside of the pending deposits. carefully special packages are about the ironic forges. slyly special 
+3|CANADA|1|eas hang ironic, silent packages. slyly regular packages are furiously over the tithes. fluffily bold
+4|EGYPT|4|y above the carefully unusual theodolites. final dugouts are quickly across the furiously regular d
+5|ETHIOPIA|0|ven packages wake quickly. regu
+\.
+
+SELECT * FROM test_schema_support.nation_hash_collation;
 
 --test with search_path is set
 SET search_path TO test_schema_support;
-SELECT n_name = 'Turkey' COLLATE english FROM nation_hash;
+CREATE TABLE nation_hash_collation_search_path(
+    n_nationkey integer not null,
+    n_name char(25) not null COLLATE english,
+    n_regionkey integer not null,
+    n_comment varchar(152)
+);
+SELECT master_create_distributed_table('nation_hash_collation_search_path', 'n_nationkey', 'hash');
+SELECT master_create_worker_shards('nation_hash_collation_search_path', 4, 1);
+
+\COPY nation_hash_collation_search_path FROM STDIN with delimiter '|';
+0|ALGERIA|0| haggle. carefully final deposits detect slyly agai
+1|ARGENTINA|1|al foxes promise slyly according to the regular accounts. bold requests alon
+2|BRAZIL|1|y alongside of the pending deposits. carefully special packages are about the ironic forges. slyly special 
+3|CANADA|1|eas hang ironic, silent packages. slyly regular packages are furiously over the tithes. fluffily bold
+4|EGYPT|4|y above the carefully unusual theodolites. final dugouts are quickly across the furiously regular d
+5|ETHIOPIA|0|ven packages wake quickly. regu
+\.
+
+SELECT * FROM nation_hash_collation_search_path;
 
 
 --test composite types with schema
@@ -352,19 +383,29 @@ CREATE TYPE test_schema_support.new_composite_type as (key1 text, key2 text);
 CREATE TYPE test_schema_support.new_composite_type as (key1 text, key2 text);
 
 \c - - - :master_port
-CREATE TABLE test_schema_support.nation_hash_search_path(
+CREATE TABLE test_schema_support.nation_hash_composite_types(
     n_nationkey integer not null,
     n_name char(25) not null,
     n_regionkey integer not null,
     n_comment varchar(152),
     test_col test_schema_support.new_composite_type
 );
-SELECT master_create_distributed_table('test_schema_support.nation_hash_search_path', 'n_nationkey', 'hash');
-SELECT master_create_worker_shards('test_schema_support.nation_hash_search_path', 4, 1);
+SELECT master_create_distributed_table('test_schema_support.nation_hash_composite_types', 'n_nationkey', 'hash');
+SELECT master_create_worker_shards('test_schema_support.nation_hash_composite_types', 4, 1);
 
-SELECT * FROM test_schema_support.nation_hash_search_path  WHERE test_col = '(a,a)'::test_schema_support.new_composite_type;
+-- insert some data to verify composite type queries
+\COPY test_schema_support.nation_hash_composite_types FROM STDIN with delimiter '|';
+0|ALGERIA|0| haggle. carefully final deposits detect slyly agai|(a,a)
+1|ARGENTINA|1|al foxes promise slyly according to the regular accounts. bold requests alon|(a,b)
+2|BRAZIL|1|y alongside of the pending deposits. carefully special packages are about the ironic forges. slyly special |(a,c)
+3|CANADA|1|eas hang ironic, silent packages. slyly regular packages are furiously over the tithes. fluffily bold|(a,d)
+4|EGYPT|4|y above the carefully unusual theodolites. final dugouts are quickly across the furiously regular d|(a,e)
+5|ETHIOPIA|0|ven packages wake quickly. regu|(a,f)
+\.
+
+SELECT * FROM test_schema_support.nation_hash_composite_types WHERE test_col = '(a,a)'::test_schema_support.new_composite_type;
 
 --test with search_path is set
 SET search_path TO test_schema_support;
-SELECT * FROM nation_hash_search_path WHERE test_col = '(a,a)'::new_composite_type;
+SELECT * FROM nation_hash_composite_types WHERE test_col = '(a,a)'::new_composite_type;
 

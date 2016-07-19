@@ -114,7 +114,8 @@ for my $option (@userPgOptions)
 
 # define functions as signature->definition
 %functions = ('fake_fdw_handler()', 'fdw_handler AS \'citus\' LANGUAGE C STRICT;',
-               'equal_test_composite_type_function(test_composite_type, test_composite_type)', 'boolean AS \'select $1.i = $2.i AND $1.i2 = $2.i2;\' LANGUAGE SQL IMMUTABLE RETURNS NULL ON NULL INPUT;');
+               'equal_test_composite_type_function(test_composite_type, test_composite_type)',
+               'boolean AS \'select $1.i = $2.i AND $1.i2 = $2.i2;\' LANGUAGE SQL IMMUTABLE RETURNS NULL ON NULL INPUT;');
 
 
 %operators = ('=', '(LEFTARG = test_composite_type, RIGHTARG = test_composite_type, PROCEDURE = equal_test_composite_type_function, HASHES)');
