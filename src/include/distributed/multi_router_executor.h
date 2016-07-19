@@ -20,22 +20,11 @@
  * XactParticipantKey acts as the key to index into the (transaction-local)
  * hash keeping track of transaction connections and shards.
  */
-typedef struct XactParticipantKey
+typedef struct XactShardConnSet
 {
-	char nodeName[MAX_NODE_LENGTH + 1]; /* hostname of host to connect to */
-	int32 nodePort;                     /* port of host to connect to */
-} XactParticipantKey;
-
-
-struct pg_conn; /* forward declared, to avoid having to include libpq-fe.h */
-
-/* XactParticipantEntry keeps track of connections and shards themselves. */
-typedef struct XactParticipantEntry
-{
-	XactParticipantKey cacheKey; /* hash entry key */
-	struct pg_conn *connection;  /* connection to remote server, if any */
-	List *shardIds;              /* shard IDs touched during the transaction */
-} XactParticipantEntry;
+	uint64 shardId;
+	List *connectionEntryList;
+} XactShardConnSet;
 
 
 /* Config variables managed via guc.c */

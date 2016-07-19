@@ -58,6 +58,7 @@ bool AllModificationsCommutative = false;
  * (not allowed) and a backend startup hook to register xact callbacks.
  */
 static HTAB *xactParticipantHash = NULL;
+static List *xactShardConnSetList = NIL;
 static bool subXactAbortAttempted = false;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
@@ -85,9 +86,9 @@ static HTAB * CreateXactParticipantHash(void);
 static PGconn * GetConnectionForPlacement(ShardPlacement *placement,
 										  bool isModificationQuery);
 static void PurgeConnectionForPlacement(ShardPlacement *placement);
-static void RecordParticipatingShardId(uint64 newShardId,
-									   XactParticipantEntry *participant);
-static void MarkParticipantShardsUnhealthy(XactParticipantEntry *participant);
+static void RecordShardIdParticipant(uint64 affectedShardId,
+									 NodeConnectionEntry *participantEntry);
+static void MarkRemainingInactivePlacements();
 
 
 /*
@@ -168,12 +169,11 @@ InitTransactionStateForTask(Task *task)
 	foreach(placementCell, task->taskPlacementList)
 	{
 		ShardPlacement *placement = (ShardPlacement *) lfirst(placementCell);
-		XactParticipantKey participantKey;
-		XactParticipantEntry *participantEntry = NULL;
+		NodeConnectionKey participantKey;
+		NodeConnectionEntry *participantEntry = NULL;
 		bool entryFound = false;
 
 		PGconn *connection = NULL;
-		uint64 *shardIdPtr = NULL;
 
 		MemSet(&participantKey, 0, sizeof(participantKey));
 		strlcpy(participantKey.nodeName, placement->nodeName,
@@ -201,9 +201,6 @@ InitTransactionStateForTask(Task *task)
 		}
 
 		participantEntry->connection = connection;
-
-		shardIdPtr = AllocateUint64(placement->shardId);
-		participantEntry->shardIds = list_make1(shardIdPtr);
 	}
 
 	MemoryContextSwitchTo(oldContext);
@@ -864,11 +861,11 @@ ExecuteTransactionEnd(bool commit)
 {
 	char *sqlCommand = commit ? "COMMIT TRANSACTION" : "ABORT TRANSACTION";
 	HASH_SEQ_STATUS scan;
-	XactParticipantEntry *participant;
-	bool completed = !commit; // aborts are assumed completed
+	NodeConnectionEntry *participant;
+	bool completed = !commit; /* aborts are assumed completed */
 
 	hash_seq_init(&scan, xactParticipantHash);
-	while ((participant = (XactParticipantEntry *) hash_seq_search(&scan)))
+	while ((participant = (NodeConnectionEntry *) hash_seq_search(&scan)))
 	{
 		PGconn *connection = participant->connection;
 		PGresult *result = NULL;
@@ -886,12 +883,7 @@ ExecuteTransactionEnd(bool commit)
 		else
 		{
 			WarnRemoteError(connection, result);
-			PurgeConnection(connection);
-
-			if (commit)
-			{
-				MarkParticipantShardsUnhealthy(participant);
-			}
+			participant->connection = NULL;
 		}
 
 		PQclear(result);
@@ -1034,6 +1026,7 @@ RouterTransactionCallback(XactEvent event, void *arg)
 			}
 
 			ExecuteTransactionEnd(commit);
+			MarkRemainingInactivePlacements();
 
 			/* leave early to avoid resetting transaction state */
 			return;
@@ -1043,6 +1036,7 @@ RouterTransactionCallback(XactEvent event, void *arg)
 	/* reset transaction state */
 	IsModifyingTransaction = false;
 	xactParticipantHash = NULL;
+	xactShardConnSetList = NIL;
 	subXactAbortAttempted = false;
 }
 
@@ -1067,11 +1061,11 @@ RouterSubtransactionCallback(SubXactEvent event, SubTransactionId subId,
 
 
 /*
- * CreateXactParticipantHash initializes the map used to store connections and
- * dirty shard information needed to process distributed transactions. As sub-
- * sequent operations touch new shards, they are added to a list within each
- * map entry, identified by host name and port. At transaction end, if a node
- * rejects the final COMMIT command, this list is used to its shards unhealthy.
+ * CreateXactParticipantHash initializes the map used to store the connections
+ * needed to process distributed transactions. Unlike the connection cache, we
+ * permit NULL connections here to signify that a participant has seen an error
+ * and is no longer receiving commands during a transaction. This has should be
+ * walked at transaction end to send final COMMIT or ABORT commands.
  */
 static HTAB *
 CreateXactParticipantHash(void)
@@ -1081,8 +1075,8 @@ CreateXactParticipantHash(void)
 	int hashFlags = 0;
 
 	MemSet(&info, 0, sizeof(info));
-	info.keysize = sizeof(XactParticipantKey);
-	info.entrysize = sizeof(XactParticipantEntry);
+	info.keysize = sizeof(NodeConnectionKey);
+	info.entrysize = sizeof(NodeConnectionEntry);
 	info.hcxt = TopTransactionContext;
 	hashFlags = (HASH_ELEM | HASH_CONTEXT);
 
@@ -1111,8 +1105,8 @@ CreateXactParticipantHash(void)
 static PGconn *
 GetConnectionForPlacement(ShardPlacement *placement, bool isModificationQuery)
 {
-	XactParticipantKey participantKey;
-	XactParticipantEntry *participantEntry = NULL;
+	NodeConnectionKey participantKey;
+	NodeConnectionEntry *participantEntry = NULL;
 	bool entryFound = false;
 
 	/* if not in a transaction, fall through to connection cache */
@@ -1137,7 +1131,7 @@ GetConnectionForPlacement(ShardPlacement *placement, bool isModificationQuery)
 	{
 		if (isModificationQuery)
 		{
-			RecordParticipatingShardId(placement->shardId, participantEntry);
+			RecordShardIdParticipant(placement->shardId, participantEntry);
 		}
 
 		return participantEntry->connection;
@@ -1176,14 +1170,13 @@ PurgeConnectionForPlacement(ShardPlacement *placement)
 
 	if (xactParticipantHash != NULL)
 	{
-		XactParticipantKey participantKey;
-		XactParticipantEntry *participantEntry = NULL;
+		NodeConnectionEntry *participantEntry = NULL;
 		bool entryFound = false;
 
 		Assert(IsTransactionBlock());
 
-		memcpy(&participantKey, &nodeKey, sizeof(XactParticipantKey));
-		participantEntry = hash_search(xactParticipantHash, &participantKey, HASH_FIND,
+		MemSet(&nodeKey.nodeUser, 0, sizeof(nodeKey.nodeUser));
+		participantEntry = hash_search(xactParticipantHash, &nodeKey, HASH_FIND,
 									   &entryFound);
 
 		Assert(entryFound);
@@ -1193,57 +1186,85 @@ PurgeConnectionForPlacement(ShardPlacement *placement)
 }
 
 
-/*
- * RecordParticipatingShardId simply adds a shard identifier to the list of
- * dirtied shards in a transaction participant entry. Conceptually similar to
- * list_append_uniq, but with uint64 and memory context handling.
- */
 static void
-RecordParticipatingShardId(uint64 newShardId, XactParticipantEntry *participant)
+RecordShardIdParticipant(uint64 affectedShardId, NodeConnectionEntry *participantEntry)
 {
-	ListCell *shardCell = NULL;
+	XactShardConnSet *shardConnSetMatch = NULL;
+	ListCell *listCell = NULL;
 	MemoryContext oldContext = NULL;
-	uint64 *newShardIdPtr = NULL;
+	List *connectionEntryList = NIL;
 
-	foreach(shardCell, participant->shardIds)
+	foreach(listCell, xactShardConnSetList)
 	{
-		uint64 *shardIdPointer = (uint64 *) lfirst(shardCell);
-		uint64 shardId = (*shardIdPointer);
+		XactShardConnSet *shardConnSet = (XactShardConnSet *) lfirst(listCell);
 
-		if (shardId == newShardId)
+		if (shardConnSet->shardId == affectedShardId)
 		{
-			return;
+			shardConnSetMatch = shardConnSet;
 		}
 	}
 
 	oldContext = MemoryContextSwitchTo(TopTransactionContext);
 
-	newShardIdPtr = AllocateUint64(newShardId);
-	participant->shardIds = lappend(participant->shardIds, newShardIdPtr);
+	if (shardConnSetMatch == NULL)
+	{
+		shardConnSetMatch = (XactShardConnSet *) palloc0(sizeof(XactShardConnSet));
+		shardConnSetMatch->shardId = affectedShardId;
+
+		xactShardConnSetList = lappend(xactShardConnSetList, shardConnSetMatch);
+	}
+
+	connectionEntryList = shardConnSetMatch->connectionEntryList;
+	shardConnSetMatch->connectionEntryList = list_append_unique_ptr(connectionEntryList,
+																	participantEntry);
 
 	MemoryContextSwitchTo(oldContext);
 }
 
 
-/*
- * MarkParticipantShardsUnhealthy marks all of a transaction participant's
- * shards as inactive. Used after a final COMMIT has failed (otherwise shards
- * are just marked inactive as each modification command fails).
- */
 static void
-MarkParticipantShardsUnhealthy(XactParticipantEntry *participant)
+MarkRemainingInactivePlacements()
 {
-	ListCell *shardCell = NULL;
-	XactParticipantKey *key = &participant->cacheKey;
+	ListCell *shardConnSetCell = NULL;
 
-	foreach(shardCell, participant->shardIds)
+	foreach(shardConnSetCell, xactShardConnSetList)
 	{
-		uint64 *shardIdPointer = (uint64 *) lfirst(shardCell);
-		uint64 shardId = (*shardIdPointer);
-		uint64 shardLength = 0;
+		XactShardConnSet *shardConnSet = (XactShardConnSet *) lfirst(shardConnSetCell);
+		List *participantList = shardConnSet->connectionEntryList;
+		ListCell *participantCell = NULL;
+		int successes = list_length(participantList);
 
-		DeleteShardPlacementRow(shardId, key->nodeName, key->nodePort);
-		InsertShardPlacementRow(shardId, FILE_INACTIVE, shardLength,
-								key->nodeName, key->nodePort);
+		foreach(participantCell, participantList)
+		{
+			NodeConnectionEntry *participant = NULL;
+			participant = (NodeConnectionEntry *) lfirst(participantCell);
+
+			if (participant->connection == NULL)
+			{
+				successes--;
+			}
+		}
+
+		if (successes == 0)
+		{
+			continue;
+		}
+
+		foreach(participantCell, participantList)
+		{
+			NodeConnectionEntry *participant = NULL;
+			participant = (NodeConnectionEntry *) lfirst(participantCell);
+
+			if (participant->connection == NULL)
+			{
+				uint64 shardId = shardConnSet->shardId;
+				NodeConnectionKey *nodeKey = &participant->cacheKey;
+				uint64 shardLength = 0;
+
+				DeleteShardPlacementRow(shardId, nodeKey->nodeName, nodeKey->nodePort);
+				InsertShardPlacementRow(shardId, FILE_INACTIVE, shardLength,
+										nodeKey->nodeName, nodeKey->nodePort);
+			}
+		}
 	}
 }
