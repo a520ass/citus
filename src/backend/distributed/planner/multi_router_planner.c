@@ -74,7 +74,7 @@ static bool MasterIrreducibleExpression(Node *expression, bool *varArgument,
 static bool MasterIrreducibleExpressionWalker(Node *expression, WalkerState *state);
 static char MostPermissiveVolatileFlag(char left, char right);
 static Task * RouterModifyTask(Query *originalQuery, Query *query);
-static ShardInterval * TargetShardInterval(Query *query);
+static ShardInterval * TargetShardIntervalForModify(Query *query);
 static List * QueryRestrictList(Query *query);
 static bool FastShardPruningPossible(CmdType commandType, char partitionMethod);
 static ShardInterval * FastShardPruning(Oid distributedTableId,
@@ -84,8 +84,8 @@ static Const * ExtractInsertPartitionValue(Query *query, Var *partitionColumn);
 static Task * RouterSelectTask(Query *originalQuery, Query *query,
 							   RelationRestrictionContext *restrictionContext,
 							   List **placementList);
-static List * TargetShardIntervalsForQuery(Query *query,
-										   RelationRestrictionContext *restrictionContext);
+static List * TargetShardIntervalsForSelect(Query *query,
+											RelationRestrictionContext *restrictionContext);
 static List * WorkersContainingAllShards(List *prunedShardIntervalsList);
 static bool UpdateRelationNames(Node *node,
 								RelationRestrictionContext *restrictionContext);
@@ -697,7 +697,7 @@ MostPermissiveVolatileFlag(char left, char right)
 static Task *
 RouterModifyTask(Query *originalQuery, Query *query)
 {
-	ShardInterval *shardInterval = TargetShardInterval(query);
+	ShardInterval *shardInterval = TargetShardIntervalForModify(query);
 	uint64 shardId = shardInterval->shardId;
 	StringInfo queryString = makeStringInfo();
 	Task *modifyTask = NULL;
@@ -747,24 +747,22 @@ RouterModifyTask(Query *originalQuery, Query *query)
 
 
 /*
- * TargetShardInterval determines the single shard targeted by a provided command.
- * If no matching shards exist, or if the modification targets more than one one
- * shard, this function raises an error depending on the command type.
+ * TargetShardIntervalForModify determines the single shard targeted by a provided
+ * modify command. If no matching shards exist, or if the modification targets more
+ * than one shard, this function raises an error depending on the command type.
  */
 static ShardInterval *
-TargetShardInterval(Query *query)
+TargetShardIntervalForModify(Query *query)
 {
-	CmdType commandType = query->commandType;
-	bool selectTask = (commandType == CMD_SELECT);
 	List *prunedShardList = NIL;
 	int prunedShardCount = 0;
-
-
 	int shardCount = 0;
 	Oid distributedTableId = ExtractFirstDistributedTableId(query);
 	DistTableCacheEntry *cacheEntry = DistributedTableCacheEntry(distributedTableId);
 	char partitionMethod = cacheEntry->partitionMethod;
 	bool fastShardPruningPossible = false;
+
+	Assert(query->commandType != CMD_SELECT);
 
 	/* error out if no shards exist for the table */
 	shardCount = cacheEntry->shardIntervalArrayLength;
@@ -808,18 +806,9 @@ TargetShardInterval(Query *query)
 	prunedShardCount = list_length(prunedShardList);
 	if (prunedShardCount != 1)
 	{
-		if (selectTask)
-		{
-			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							errmsg("router executor queries must target exactly one "
-								   "shard")));
-		}
-		else
-		{
-			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							errmsg("distributed modifications must target exactly one "
-								   "shard")));
-		}
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("distributed modifications must target exactly one "
+							   "shard")));
 	}
 
 	return (ShardInterval *) linitial(prunedShardList);
@@ -1002,8 +991,8 @@ RouterSelectTask(Query *originalQuery, Query *query,
 				 List **placementList)
 {
 	Task *task = NULL;
-	List *prunedRelationShardList = TargetShardIntervalsForQuery(query,
-																 restrictionContext);
+	List *prunedRelationShardList = TargetShardIntervalsForSelect(query,
+																  restrictionContext);
 	StringInfo queryString = makeStringInfo();
 	uint64 shardId = INVALID_SHARD_ID;
 	bool upsertQuery = false;
@@ -1064,14 +1053,15 @@ RouterSelectTask(Query *originalQuery, Query *query,
 
 
 /*
- * TargetShardIntervalsForQuery performs shard pruning for all referenced relations
+ * TargetShardIntervalsForSelect performs shard pruning for all referenced relations
  * in the query and returns list of shards per relation. Shard pruning is done based
  * on provided restriction context per relation. The function bails out and returns NULL
  * if any of the relations has no active shards. It also records pruned shard intervals
  * in relation restriction context to be used later on.
  */
 static List *
-TargetShardIntervalsForQuery(Query *query, RelationRestrictionContext *restrictionContext)
+TargetShardIntervalsForSelect(Query *query,
+							  RelationRestrictionContext *restrictionContext)
 {
 	List *prunedRelationShardList = NIL;
 	ListCell *restrictionCell = NULL;
@@ -1176,7 +1166,7 @@ WorkersContainingAllShards(List *prunedShardIntervalsList)
 						(ShardPlacement *) lfirst(shardPlacementCell);
 					if ((shardPlacement->nodePort == existingPlacement->nodePort) &&
 						(strncmp(shardPlacement->nodeName, existingPlacement->nodeName,
-								WORKER_LENGTH) == 0))
+								 WORKER_LENGTH) == 0))
 					{
 						placementList = lappend(placementList, existingPlacement);
 					}
